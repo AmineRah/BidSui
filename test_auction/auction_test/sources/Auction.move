@@ -1,4 +1,4 @@
-module BidSui::Auction { 
+module AuctionCore::Auction {
     use sui::object;
     use sui::tx_context::{Self, TxContext};
     use std::string::String;
@@ -6,7 +6,7 @@ module BidSui::Auction {
     use sui::event;
     use std::option::{Self, Option};
     use sui::coin::{Self, Coin};
-    use sui::sui::SUI; 
+    use sui::sui::SUI;
     use sui::transfer;
 
     /// Objet Auction
@@ -15,10 +15,10 @@ module BidSui::Auction {
         min_val: u64,
         max_val: u64,
         initial_max_val: u64,
-        current_bidder_id: Option<address>,  
+        current_bidder_id: Option<address>, 
         current_bid_amount: u64,
         seller_id: address,
-        start_time: u64, 
+        start_time: u64,
         dead_line: u64,
         name: String,
         description: String,
@@ -39,7 +39,7 @@ module BidSui::Auction {
         id: ID,
         min_val: u64,
         max_val: u64,
-        current_bidder_id: Option<address>, 
+        current_bidder_id: Option<address>,
     }
 
     /// Création d'une enchère
@@ -97,7 +97,7 @@ module BidSui::Auction {
             return false
         };
         
-        // Bid must be above minimum floor (auction minimum price)
+        // Bid must be above minimum floor
         if (bid_amount < auction.min_val) {
             return false
         };
@@ -170,7 +170,7 @@ module BidSui::Auction {
         };
         
         // Check if ceiling has reached the highest bid
-        if (option::is_some(&auction.current_bidder_id) && current_ceiling == auction.current_bid_amount) {
+        if (option::is_some(&auction.current_bidder_id) && current_ceiling <= auction.current_bid_amount) {
             auction.ended = true;
             let auction_id = object::uid_to_inner(&auction.id);
             event::emit(EndedAuctionEvent {

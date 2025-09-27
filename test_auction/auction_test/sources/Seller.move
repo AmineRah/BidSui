@@ -1,21 +1,21 @@
-module BidSui::Seller {
+module Seller::Seller {
     use std::string::String;
     use sui::event;
-    use sui::clock::Clock;  
-    use BidSui::Auction::{Self as AuctionModule, Auction};
+    use sui::clock::Clock;
+    use AuctionCore::Auction::{Self as AuctionModule, Auction};
     use sui::coin::{Self, Coin};
     use sui::sui::SUI;
     use sui::tx_context::{Self, TxContext};
     use sui::object::{Self, ID, UID};
     use sui::transfer;
-    use std::vector; 
+    use std::vector;
 
     const ENotOwner: u64 = 0;
     const EAuctionNotFound: u64 = 1;
 
     public struct SellerProfile has key, store {
-        id: UID, 
-        name: String, 
+        id: UID,
+        name: String,
         created_auctions: vector<ID>,
         total_sales: u64,
         reputation: u64,
@@ -44,10 +44,10 @@ module BidSui::Seller {
         let profile = SellerProfile {
             id: uid,
             name,
-            created_auctions: vector::empty<ID>(), 
+            created_auctions: vector::empty<ID>(),
             total_sales: 0,
             reputation: 0,
-            seller_coin: coin, 
+            seller_coin: coin,
         };
 
         event::emit(SellerProfileCreated {
@@ -75,25 +75,27 @@ module BidSui::Seller {
         description: String,
         clock: &Clock,
         ctx: &mut TxContext
-    ) {
-        // Création de l'objet Auction (il est automatiquement transféré au vendeur)
-        let current_time = sui::clock::timestamp_ms(clock);
-        let dead_line = current_time + duration_ms;
-        let seller_address = tx_context::sender(ctx);
-        
-        AuctionModule::create_auction(
-            ctx, 
-            seller_address,
+    ): Auction {
+        // Création de l'objet Auction
+        let auction = AuctionModule::create_auction(
+            ctx,
+            tx_context::sender(ctx),
             min_val,
             max_val,
-            dead_line,
+            duration_ms,
             clock,
             name,
             description
         );
 
-        // Note: L'auction est automatiquement transférée au vendeur par le module Auction
-        // L'ID sera récupéré via les événements émis par le module Auction si nécessaire
+        // Récupération de l'ID de l'auction
+        let auction_id = object::uid_to_inner(&auction.id);
+
+        // Ajout de l'ID dans le SellerProfile
+        vector::push_back(&mut seller.created_auctions, auction_id);
+
+        // Retourne l'objet Auction pour qu'il soit stocké sur la blockchain
+        auction
     }
 
     // --- Gestion de l’argent (hooks appelés par Auction) ---

@@ -1,22 +1,22 @@
-module BidSui::Bidder {
-    use sui::object::{Self, ID, UID}; 
+module Bidder::Bidder {
+    use sui::object::{Self, ID, UID};
     use sui::tx_context::{Self, TxContext};
     use std::string::String;
     use sui::clock::{Self as clock, Clock};
-    use BidSui::Auction::{Self as AuctionModule, Auction};
+    use AuctionCore::Auction::{Self as AuctionModule, Auction};
     use sui::coin::{Self, Coin};
     use sui::sui::SUI;
 
     const ENotValidBid: u64 = 0;
     const EBidNotAccepted: u64 = 1;
-    const EInsufficientFunds: u64 = 2;  
+    const EInsufficientFunds: u64 = 2;
 
     // Historique d'une enchère
     public struct BidHistory has store {
         auction_id: ID,
         bid_amount: u64,
         timestamp: u64,
-        won: bool, 
+        won: bool,
     }
 
     public struct BidderProfile has key {
