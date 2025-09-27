@@ -1,15 +1,17 @@
 module Seller::Seller {
-    use sui::object::{Self, ID, UID};
-    use sui::tx_context::{Self, TxContext};
+    use sui::object::{Self as object, ID, UID};
+    use sui::tx_context::{Self as tx_context, TxContext};
     use std::string::String;
     use sui::clock::Clock;
     use sui::transfer;
+    use sui::event;
+    use std::vector;
     use AuctionCore::Auction::{Self as AuctionModule, Auction};
 
     const ENotOwner: u64 = 0;
     const EAuctionNotFound: u64 = 1;
 
-    public struct SellerProfile has key {
+    public struct SellerProfile has key, store {
         id: UID,
         name: String,
         created_auctions: vector<ID>, // IDs des enchères créées par ce vendeur
@@ -17,13 +19,13 @@ module Seller::Seller {
         reputation: u64,
     }
 
-    // Événement lors de la création d'un profil vendeur
+    // --- Events ---
     public struct SellerProfileCreated has copy, drop {
         seller_id: ID,
         name: String,
     }
 
-    // Créer un profil vendeur
+    
     public fun create_seller_profile(
         name: String, 
         ctx: &mut TxContext
@@ -39,7 +41,7 @@ module Seller::Seller {
             reputation: 0,
         };
 
-        sui::event::emit(SellerProfileCreated {
+        event::emit(SellerProfileCreated {
             seller_id,
             name,
         });
@@ -47,7 +49,15 @@ module Seller::Seller {
         profile
     }
 
-    // Créer une nouvelle enchère (pour le vendeur)
+    public fun id(seller: &SellerProfile): ID {
+        object::uid_to_inner(&seller.id)
+    }
+
+
+    public fun add_created_auction(seller: &mut SellerProfile, auction_id: ID) {
+        vector::push_back(&mut seller.created_auctions, auction_id);
+    }
+
     public fun create_auction(
         seller: &mut SellerProfile,
         min_val: u64,
@@ -57,24 +67,19 @@ module Seller::Seller {
         clock: &Clock,
         ctx: &mut TxContext
     ) {
-        let auction = AuctionCore::Auction::create_auction(ctx, min_val, max_val, clock, name, description);
-        let auction_id = object::id(&auction);
-        vector::push_back(&mut seller.created_auctions, auction_id);
+        // Passe le profil vendeur à Auction
+        AuctionModule::create_auction(ctx, seller, min_val, max_val, clock, name, description);
     }
 
-    // Terminer une enchère (seulement le propriétaire)
     public fun end_auction(
         seller: &mut SellerProfile,
         auction: Auction,
     ) {
-        // Vérifier que l'enchère appartient au vendeur
         let auction_id = object::id(&auction);
         assert!(vector::contains(&seller.created_auctions, &auction_id), ENotOwner);
         
-        // Supprimer l'enchère
         AuctionModule::delete_auction(auction);
         
-        // Mettre à jour le profil vendeur
         let (found, index) = vector::index_of(&seller.created_auctions, &auction_id);
         if (found) {
             vector::remove(&mut seller.created_auctions, index);
@@ -82,4 +87,14 @@ module Seller::Seller {
         };
     }
 
+    // --- Gestion de l’argent (hooks appelés par Auction) ---
+    public fun receive_money(seller: &mut SellerProfile, amount: u64, _ctx: &mut TxContext) {
+        seller.total_sales = seller.total_sales + amount;
+    }
+
+    public fun return_money(_seller: &mut SellerProfile, bidder: ID, ctx: &mut TxContext) {
+        // Ici on simplifie : on transfère juste un nouvel objet comme remboursement
+        let refund_obj = object::new(ctx);
+        transfer::transfer(refund_obj, bidder);
+    }
 }
