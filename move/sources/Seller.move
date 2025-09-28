@@ -82,14 +82,14 @@ module BidSui::Seller {
         let seller_address = tx_context::sender(ctx);
         
         AuctionModule::create_auction(
-            ctx, 
             seller_address,
-            min_val,
+            min_val, 
             max_val,
             dead_line,
             clock,
             name,
-            description
+            description,
+            ctx
         );
 
         // Note: L'auction est automatiquement transférée au vendeur par le module Auction

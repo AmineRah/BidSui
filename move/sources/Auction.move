@@ -44,14 +44,14 @@ module BidSui::Auction {
 
     /// Création d'une enchère
     public fun create_auction(
-        ctx: &mut TxContext,
         seller: address,
         min_val: u64,
         max_val: u64,
         dead_line: u64,
         clock: &Clock,
         name: String,
-        description: String
+        description: String,
+        ctx: &mut TxContext
     ) {
         let uid = object::new(ctx);
         let id = object::uid_to_inner(&uid);
