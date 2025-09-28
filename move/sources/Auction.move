@@ -8,9 +8,10 @@ module BidSui::Auction {
     use sui::coin::{Self, Coin};
     use sui::sui::SUI; 
     use sui::transfer;
+    use BidSui::ExampleNFT::ExampleNFT;
 
-    /// Objet Auction
-    public struct Auction has key, store {
+    /// Objet Auction avec escrow NFT intégré
+    public struct Auction has key {
         id: UID,
         min_val: u64,
         max_val: u64,
@@ -24,10 +25,12 @@ module BidSui::Auction {
         description: String,
         ended: bool,
         escrowed_funds: Coin<SUI>, // Funds locked from current highest bidder
+        escrowed_nft: Option<ExampleNFT>, // NFT mis en escrow (peut être vide)
     }
 
     public struct CreateAuctionEvent has copy, drop {
         id: ID,
+        nft_id: Option<ID>,
     }
 
     public struct EndedAuctionEvent has copy, drop {
@@ -42,9 +45,10 @@ module BidSui::Auction {
         current_bidder_id: Option<address>, 
     }
 
-    /// Création d'une enchère
+    /// Création d'une enchère avec escrow automatique du NFT
     public fun create_auction(
         seller: address,
+        nft: Option<ExampleNFT>,
         min_val: u64,
         max_val: u64,
         dead_line: u64,
@@ -52,7 +56,7 @@ module BidSui::Auction {
         name: String,
         description: String,
         ctx: &mut TxContext
-    ) {
+    ): Auction {
         let uid = object::new(ctx);
         let id = object::uid_to_inner(&uid);
 
@@ -73,10 +77,16 @@ module BidSui::Auction {
             description: description,
             ended: false,
             escrowed_funds: escrowed_funds,
+            escrowed_nft: nft, // Le NFT est automatiquement mis en escrow (peut être vide)
         };
 
-        transfer::transfer(auction, seller);
-        event::emit(CreateAuctionEvent { id });
+        let nft_id = if (option::is_some(&auction.escrowed_nft)) {
+            option::some(object::id(option::borrow(&auction.escrowed_nft)))
+        } else {
+            option::none<ID>()
+        };
+        event::emit(CreateAuctionEvent { id, nft_id });
+        auction
     }
 
     /// Place a bid in the hybrid auction with proper escrow handling
@@ -104,8 +114,8 @@ module BidSui::Auction {
         
         // Check if this is a higher bid than current
         if (bid_amount > auction.current_bid_amount) {
-            // Refund previous bidder if exists
-            if (option::is_some(&auction.current_bidder_id)) {
+            // Refund previous bidder if exists and has funds to refund
+            if (option::is_some(&auction.current_bidder_id) && auction.current_bid_amount > 0) {
                 let previous_bidder = *option::borrow(&auction.current_bidder_id);
                 let refund_amount = auction.current_bid_amount;
                 
@@ -183,42 +193,66 @@ module BidSui::Auction {
         false
     }
 
-    /// End auction and transfer escrowed funds to seller
+    /// End auction and transfer escrowed funds and NFT
     public fun end_auction(
-        auction: &mut Auction,
+        mut auction: Auction,
         seller_coin: &mut Coin<SUI>,
         ctx: &mut TxContext
     ) {
         assert!(auction.ended, 0); // Auction must be ended first
         
-        if (option::is_some(&auction.current_bidder_id)) {
+        // Extract all necessary values before destructuring
+        let has_winner = option::is_some(&auction.current_bidder_id);
+        let winner = if (has_winner) {
+            *option::borrow(&auction.current_bidder_id)
+        } else {
+            @0x0 // Dummy address, won't be used
+        };
+        let seller = auction.seller_id;
+        
+        if (has_winner) {
             // Transfer escrowed funds to seller
             let winning_amount = auction.current_bid_amount;
             let payment = coin::split(&mut auction.escrowed_funds, winning_amount, ctx);
             seller_coin.join(payment);
         };
         
-        let auction_id = object::uid_to_inner(&auction.id);
-        event::emit(EndedAuctionEvent {
-            id: auction_id,
-            final_price: auction.current_bid_amount,
-        });
+        // Destructure auction and handle NFT
+        let Auction { id, min_val: _, max_val: _, initial_max_val: _, current_bidder_id: _, current_bid_amount: _, seller_id: _, start_time: _, dead_line: _, name: _, description: _, ended: _, escrowed_funds, mut escrowed_nft } = auction;
+        object::delete(id);
+        
+        // Consume remaining escrowed funds by transferring to seller
+        transfer::public_transfer(escrowed_funds, seller);
+        
+        // Handle NFT transfer - always consume the option
+        let nft_recipient = if (has_winner) { winner } else { seller };
+        if (option::is_some(&escrowed_nft)) {
+            let nft = option::extract(&mut escrowed_nft);
+            transfer::public_transfer(nft, nft_recipient);
+        } else {
+            // No NFT to transfer, consume the empty option
+            option::destroy_none(escrowed_nft);
+            
+        }
     }
     
-    /// Refund escrowed funds to current bidder (if auction ends without winner)
-    public fun refund_escrowed_funds(
-        auction: &mut Auction,
+    /// Get the NFT from the auction (for external access) - returns Option
+    public fun get_nft(auction: &Auction): &Option<ExampleNFT> {
+        &auction.escrowed_nft
+    }
+
+    /// Create an empty auction (without NFT) - useful for testing
+    public fun create_empty_auction(
+        seller: address,
+        min_val: u64,
+        max_val: u64,
+        dead_line: u64,
+        clock: &Clock,
+        name: String,
+        description: String,
         ctx: &mut TxContext
-    ) {
-        assert!(auction.ended, 0);
-        
-        if (option::is_some(&auction.current_bidder_id)) {
-            let bidder = *option::borrow(&auction.current_bidder_id);
-            let refund_amount = auction.current_bid_amount;
-            
-            let refund_coin = coin::split(&mut auction.escrowed_funds, refund_amount, ctx);
-            transfer::public_transfer(refund_coin, bidder);
-        };
+    ): Auction {
+        create_auction(seller, option::none<ExampleNFT>(), min_val, max_val, dead_line, clock, name, description, ctx)
     }
 
 }

@@ -3,6 +3,7 @@ module BidSui::Seller {
     use sui::event;
     use sui::clock::Clock;  
     use BidSui::Auction::{Self as AuctionModule, Auction};
+    use BidSui::ExampleNFT::ExampleNFT;
     use sui::coin::{Self, Coin};
     use sui::sui::SUI;
     use sui::tx_context::{Self, TxContext};
@@ -68,6 +69,7 @@ module BidSui::Seller {
 
     public fun create_auction(
         seller: &mut SellerProfile,
+        nft: ExampleNFT,
         min_val: u64,
         max_val: u64,
         duration_ms: u64,
@@ -75,14 +77,15 @@ module BidSui::Seller {
         description: String,
         clock: &Clock,
         ctx: &mut TxContext
-    ) {
+    ): Auction {
         // Création de l'objet Auction (il est automatiquement transféré au vendeur)
         let current_time = sui::clock::timestamp_ms(clock);
         let dead_line = current_time + duration_ms;
         let seller_address = tx_context::sender(ctx);
         
-        AuctionModule::create_auction(
+        let auction = AuctionModule::create_auction(
             seller_address,
+            option::some(nft),
             min_val, 
             max_val,
             dead_line,
@@ -93,7 +96,8 @@ module BidSui::Seller {
         );
 
         // Note: L'auction est automatiquement transférée au vendeur par le module Auction
-        // L'ID sera récupéré via les événements émis par le module Auction si nécessaire
+        // Le NFT est automatiquement mis en escrow dans l'auction
+        auction
     }
 
     // --- Gestion de l’argent (hooks appelés par Auction) ---

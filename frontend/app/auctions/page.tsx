@@ -25,13 +25,8 @@ import {
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import {
-  getActiveAuctions,
-  AuctionData,
-  initializeTestData,
-  recalculateUniqueBidders,
-  deleteAuction,
-} from "../lib/storage";
+import { apiService, Auction } from "../../lib/api";
+import { getActiveAuctions, AuctionData, deleteAuction } from "../lib/storage";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 
 // Composant Badge simple
@@ -61,9 +56,11 @@ export default function BrowseAuctions() {
   const [dateFilter, setDateFilter] = useState("newest");
   const [showFilterMenu, setShowFilterMenu] = useState(false);
   const [auctions, setAuctions] = useState<AuctionData[]>([]);
+  const [backendAuctions, setBackendAuctions] = useState<Auction[]>([]);
   const [showNewAuctionMessage, setShowNewAuctionMessage] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [auctionToDelete, setAuctionToDelete] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const account = useCurrentAccount();
 
   // Fonction pour supprimer une enchère
@@ -100,24 +97,64 @@ export default function BrowseAuctions() {
 
   // Charger les enchères au montage du composant
   useEffect(() => {
-    // Recalculer le nombre de bidders uniques pour toutes les enchères
-    recalculateUniqueBidders();
-    const activeAuctions = getActiveAuctions();
-    setAuctions(activeAuctions);
+    const loadAuctions = async () => {
+      try {
+        setIsLoading(true);
+        console.log("Loading auctions...");
+
+        // Charger les enchères du backend
+        const backendResult = await apiService.getAuctions();
+        console.log("Backend result:", backendResult);
+
+        if (backendResult.success && backendResult.data) {
+          console.log("Setting backend auctions:", backendResult.data);
+          setBackendAuctions(backendResult.data);
+        } else {
+          console.warn("Failed to load backend auctions:", backendResult.error);
+          setBackendAuctions([]); // Set empty array if no data
+        }
+
+        // Charger les enchères locales (fallback)
+        const localAuctions = getActiveAuctions();
+        console.log("Local auctions:", localAuctions);
+        setAuctions(localAuctions);
+      } catch (error) {
+        console.error("Failed to load auctions:", error);
+        // Fallback vers les enchères locales
+        const localAuctions = getActiveAuctions();
+        setAuctions(localAuctions);
+        setBackendAuctions([]); // Set empty array on error
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadAuctions();
   }, []);
 
   // Recharger les enchères quand la page devient visible (pour les nouvelles publications)
   useEffect(() => {
-    const handleVisibilityChange = () => {
+    const handleVisibilityChange = async () => {
       if (!document.hidden) {
-        const activeAuctions = getActiveAuctions();
-        const previousCount = auctions.length;
-        setAuctions(activeAuctions);
+        try {
+          // Recharger les enchères du backend
+          const backendResult = await apiService.getAuctions();
+          if (backendResult.success && backendResult.data) {
+            const previousCount = backendAuctions.length;
+            setBackendAuctions(backendResult.data);
 
-        // Afficher un message si de nouvelles enchères ont été ajoutées
-        if (activeAuctions.length > previousCount) {
-          setShowNewAuctionMessage(true);
-          setTimeout(() => setShowNewAuctionMessage(false), 5000);
+            // Afficher un message si de nouvelles enchères ont été ajoutées
+            if (backendResult.data.length > previousCount) {
+              setShowNewAuctionMessage(true);
+              setTimeout(() => setShowNewAuctionMessage(false), 5000);
+            }
+          }
+
+          // Recharger les enchères locales aussi
+          const localAuctions = getActiveAuctions();
+          setAuctions(localAuctions);
+        } catch (error) {
+          console.error("Failed to reload auctions:", error);
         }
       }
     };
@@ -125,7 +162,7 @@ export default function BrowseAuctions() {
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () =>
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [auctions.length]);
+  }, [backendAuctions.length]);
 
   // Fermer le menu de filtre quand on clique ailleurs
   useEffect(() => {
@@ -144,7 +181,58 @@ export default function BrowseAuctions() {
     };
   }, [showFilterMenu]);
 
-  // Plus de données mockées - utiliser uniquement les enchères du localStorage
+  // Fonction pour convertir les enchères du backend vers le format d'affichage
+  const convertBackendAuctionToDisplay = (auction: any): AuctionData => {
+    console.log("Converting auction:", auction);
+
+    // Handle different auction data structures
+    const auctionData = auction.content?.fields || auction;
+    const now = Date.now();
+
+    // Calculate time left based on deadline
+    const deadline =
+      auctionData.deadLine ||
+      auctionData.deadline ||
+      Date.now() + 24 * 60 * 60 * 1000; // Default to 24h if no deadline
+    const timeLeft = Math.max(0, deadline - now);
+    const hours = Math.floor(timeLeft / (1000 * 60 * 60));
+    const minutes = Math.floor((timeLeft % (1000 * 60 * 60)) / (1000 * 60));
+
+    return {
+      id: auction.id || auctionData.id || auction.objectId,
+      title: auctionData.name || auctionData.title || "Untitled Auction",
+      description: auctionData.description || "No description available",
+      category: auctionData.category || "NFT", // Use category from auction data
+      tags: auctionData.tags || ["Sui", "NFT", "Blockchain"],
+      images: auctionData.nftMetadata?.image
+        ? [auctionData.nftMetadata.image]
+        : [], // Use NFT metadata image
+      mainImage: auctionData.mainImage || auctionData.nftMetadata?.image || "", // Use main image or NFT metadata
+      startingPrice: (
+        auctionData.minVal ||
+        auctionData.minPrice ||
+        0
+      ).toString(),
+      reservePrice: (
+        auctionData.maxVal ||
+        auctionData.maxPrice ||
+        0
+      ).toString(),
+      currentBid: (
+        auctionData.currentBidAmount ||
+        auctionData.currentBid ||
+        0
+      ).toString(),
+      duration: Math.floor(
+        deadline - (auctionData.startTime || Date.now()),
+      ).toString(),
+      creator: auctionData.sellerId || auctionData.seller || "Unknown",
+      createdAt: new Date(auctionData.startTime || Date.now()).toISOString(),
+      status: auctionData.ended ? "ended" : auctionData.status || "active",
+      timeLeft: timeLeft > 0 ? `${hours}h ${minutes}m` : "Ended",
+      bidders: auctionData.currentBidderId ? 1 : 0,
+    };
+  };
 
   const categories = [
     "All",
@@ -156,8 +244,14 @@ export default function BrowseAuctions() {
     "Utility",
   ];
 
+  // Combiner les enchères du backend et locales
+  const allAuctions = [
+    ...backendAuctions.map(convertBackendAuctionToDisplay),
+    ...auctions,
+  ];
+
   // Fonction de filtrage des enchères
-  const filteredAuctions = auctions.filter((auction: any) => {
+  const filteredAuctions = allAuctions.filter((auction: any) => {
     const matchesSearch =
       auction.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
       auction.category.toLowerCase().includes(searchTerm.toLowerCase());
@@ -178,7 +272,6 @@ export default function BrowseAuctions() {
     }
   });
 
-  // Utiliser uniquement les enchères du localStorage
   const displayAuctions = sortedAuctions;
 
   return (
@@ -351,135 +444,160 @@ export default function BrowseAuctions() {
 
       {/* Auctions Grid */}
       <div className="relative z-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {displayAuctions.length > 0 ? (
-            displayAuctions.map((auction) => (
-              <Link key={auction.id} href={`/product/${auction.id}`}>
-                <Card className="bg-slate-800/90 backdrop-blur-sm border-slate-700/50 shadow-2xl hover:shadow-blue-500/10 transition-all duration-300 cursor-pointer group transform hover:scale-105 hover:border-blue-500/50">
-                  <div className="relative overflow-hidden">
-                    {/* Image réelle ou placeholder */}
-                    {"mainImage" in auction && auction.mainImage ? (
-                      <img
-                        src={auction.mainImage}
-                        alt={auction.title}
-                        className="w-full h-48 object-cover rounded-t-lg group-hover:scale-110 transition-transform duration-500"
-                      />
-                    ) : (
-                      <div className="w-full h-48 bg-gradient-to-br from-blue-500/20 to-purple-500/20 rounded-t-lg flex items-center justify-center">
-                        <div className="text-center">
-                          <div className="text-4xl mb-2">🎨</div>
-                          <div className="text-blue-300 text-sm font-medium">
-                            NFT Preview
+        {isLoading ? (
+          <div className="flex items-center justify-center py-12">
+            <div className="flex flex-col items-center space-y-4">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+              <div className="text-white text-xl">Loading auctions...</div>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {displayAuctions.length > 0 ? (
+              displayAuctions.map((auction) => (
+                <Link key={auction.id} href={`/product/${auction.id}`}>
+                  <Card className="bg-slate-800/90 backdrop-blur-sm border-slate-700/50 shadow-2xl hover:shadow-blue-500/10 transition-all duration-300 cursor-pointer group transform hover:scale-105 hover:border-blue-500/50">
+                    <div className="relative overflow-hidden">
+                      {/* Image réelle ou placeholder */}
+                      {"mainImage" in auction && auction.mainImage ? (
+                        <img
+                          src={auction.mainImage}
+                          alt={auction.title}
+                          className="w-full h-48 object-cover rounded-t-lg group-hover:scale-110 transition-transform duration-500"
+                        />
+                      ) : (
+                        <div className="w-full h-48 bg-gradient-to-br from-blue-500/20 to-purple-500/20 rounded-t-lg flex items-center justify-center">
+                          <div className="text-center">
+                            <div className="text-4xl mb-2">🎨</div>
+                            <div className="text-blue-300 text-sm font-medium">
+                              NFT Preview
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    )}
-
-                    {/* Status Badge */}
-                    <Badge
-                      className={`absolute top-3 right-3 ${
-                        auction.status === "ended"
-                          ? "bg-gray-500/90 text-white backdrop-blur-sm"
-                          : "bg-gradient-to-r from-green-500 to-emerald-500 text-white shadow-lg"
-                      }`}
-                    >
-                      {auction.status === "ended" ? "Ended" : "Active"}
-                    </Badge>
-
-                    {/* Overlay gradient */}
-                    <div className="absolute inset-0 bg-gradient-to-t from-slate-900/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-                  </div>
-
-                  <CardHeader className="pb-3">
-                    <CardTitle className="text-lg text-white group-hover:text-blue-400 transition-colors">
-                      {auction.title}
-                    </CardTitle>
-                    <CardDescription className="text-sm text-blue-400 font-medium">
-                      {auction.category}
-                    </CardDescription>
-                  </CardHeader>
-
-                  <CardContent className="pt-0">
-                    {/* Current Bid */}
-                    <div className="mb-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-gray-400">
-                          Current Bid
-                        </span>
-                        <span className="text-xl font-bold text-white">
-                          {auction.currentBid ||
-                            ("startingPrice" in auction
-                              ? auction.startingPrice
-                              : "0.00")}{" "}
-                          SUI
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Auction Info */}
-                    <div className="space-y-2 mb-4">
-                      <div className="flex items-center text-sm text-gray-400">
-                        <Clock className="w-4 h-4 mr-2 text-blue-400" />
-                        <span>{auction.timeLeft} left</span>
-                      </div>
-                      <div className="flex items-center text-sm text-gray-400">
-                        <Users className="w-4 h-4 mr-2 text-purple-400" />
-                        <span>{auction.bidders} bidders</span>
-                      </div>
-                    </div>
-
-                    {/* Action Buttons */}
-                    <div className="flex gap-2">
-                      <Button className="flex-1 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white rounded-xl shadow-lg hover:shadow-blue-500/25 transition-all duration-300 transform hover:scale-105">
-                        <Zap className="w-4 h-4 mr-2" />
-                        Place Bid
-                      </Button>
-                      <Button
-                        variant="outline"
-                        className="border-2 border-blue-400/50 text-blue-300 hover:bg-blue-600/20 hover:text-white bg-slate-700/50 backdrop-blur-sm rounded-xl transition-all duration-300 transform hover:scale-105"
-                      >
-                        <TrendingUp className="w-4 h-4" />
-                      </Button>
-                      {/* Bouton Delete pour le propriétaire */}
-                      {account && auction.creator === account.address && (
-                        <Button
-                          onClick={(e: React.MouseEvent) =>
-                            handleDeleteAuction(auction.id, e)
-                          }
-                          className="bg-red-600 hover:bg-red-700 text-white rounded-xl shadow-lg hover:shadow-red-500/25 transition-all duration-300 transform hover:scale-105 border-2 border-red-400/50"
-                          size="sm"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
                       )}
+
+                      {/* Status Badge */}
+                      <Badge
+                        className={`absolute top-3 right-3 ${
+                          auction.status === "ended"
+                            ? "bg-gray-500/90 text-white backdrop-blur-sm"
+                            : "bg-gradient-to-r from-green-500 to-emerald-500 text-white shadow-lg"
+                        }`}
+                      >
+                        {auction.status === "ended" ? "Ended" : "Active"}
+                      </Badge>
+
+                      {/* Overlay gradient */}
+                      <div className="absolute inset-0 bg-gradient-to-t from-slate-900/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
                     </div>
-                  </CardContent>
-                </Card>
-              </Link>
-            ))
-          ) : (
-            <div className="col-span-full text-center py-12">
-              <div className="text-6xl mb-4">🔍</div>
-              <h3 className="text-xl font-semibold text-gray-300 mb-2">
-                No auctions found
-              </h3>
-              <p className="text-gray-400">
-                Try adjusting your search terms or category filters
-              </p>
-            </div>
-          )}
-        </div>
+
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-lg text-white group-hover:text-blue-400 transition-colors">
+                        {auction.title}
+                      </CardTitle>
+                      <CardDescription className="text-sm text-blue-400 font-medium">
+                        {auction.category}
+                      </CardDescription>
+                    </CardHeader>
+
+                    <CardContent className="pt-0">
+                      {/* Current Bid */}
+                      <div className="mb-4">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm text-gray-400">
+                            Current Bid
+                          </span>
+                          <span className="text-xl font-bold text-white">
+                            {auction.currentBid ||
+                              ("startingPrice" in auction
+                                ? auction.startingPrice
+                                : "0.00")}{" "}
+                            SUI
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Auction Info */}
+                      <div className="space-y-2 mb-4">
+                        <div className="flex items-center text-sm text-gray-400">
+                          <Clock className="w-4 h-4 mr-2 text-blue-400" />
+                          <span>{auction.timeLeft} left</span>
+                        </div>
+                        <div className="flex items-center text-sm text-gray-400">
+                          <Users className="w-4 h-4 mr-2 text-purple-400" />
+                          <span>{auction.bidders} bidders</span>
+                        </div>
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="flex gap-2">
+                        <Button className="flex-1 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white rounded-xl shadow-lg hover:shadow-blue-500/25 transition-all duration-300 transform hover:scale-105">
+                          <Zap className="w-4 h-4 mr-2" />
+                          Place Bid
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="border-2 border-blue-400/50 text-blue-300 hover:bg-blue-600/20 hover:text-white bg-slate-700/50 backdrop-blur-sm rounded-xl transition-all duration-300 transform hover:scale-105"
+                        >
+                          <TrendingUp className="w-4 h-4" />
+                        </Button>
+                        {/* Bouton Delete pour le propriétaire */}
+                        {account && auction.creator === account.address && (
+                          <Button
+                            onClick={(e: React.MouseEvent) =>
+                              handleDeleteAuction(auction.id, e)
+                            }
+                            className="bg-red-600 hover:bg-red-700 text-white rounded-xl shadow-lg hover:shadow-red-500/25 transition-all duration-300 transform hover:scale-105 border-2 border-red-400/50"
+                            size="sm"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </Link>
+              ))
+            ) : (
+              <div className="col-span-full text-center py-16">
+                <div className="text-8xl mb-6">🎨</div>
+                <h3 className="text-2xl font-semibold text-white mb-4">
+                  No auctions available yet
+                </h3>
+                <p className="text-gray-300 mb-6 max-w-md mx-auto">
+                  Be the first to create an amazing NFT auction! Start by
+                  uploading your digital artwork.
+                </p>
+                <Link href="/sell">
+                  <Button className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white px-8 py-3 rounded-xl shadow-lg hover:shadow-blue-500/25 transition-all duration-300 transform hover:scale-105">
+                    Create Your First Auction
+                  </Button>
+                </Link>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Load More */}
-        {auctions.length > 9 && (
+        {!isLoading && displayAuctions.length > 9 && (
           <div className="text-center mt-12">
             <Button
               variant="outline"
               className="border-white text-white hover:bg-white hover:text-slate-900 px-8 py-3"
-              onClick={() => {
-                // Recharger les enchères depuis le localStorage
-                const activeAuctions = getActiveAuctions();
-                setAuctions(activeAuctions);
+              onClick={async () => {
+                try {
+                  // Recharger les enchères du backend
+                  const backendResult = await apiService.getAuctions();
+                  if (backendResult.success && backendResult.data) {
+                    setBackendAuctions(backendResult.data);
+                  }
+
+                  // Recharger les enchères locales
+                  const localAuctions = getActiveAuctions();
+                  setAuctions(localAuctions);
+                } catch (error) {
+                  console.error("Failed to reload auctions:", error);
+                }
               }}
             >
               Load More Auctions

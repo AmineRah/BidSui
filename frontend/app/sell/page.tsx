@@ -4,11 +4,7 @@ import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { truncateWalletAddress } from "../lib/utils";
-import {
-  addAuction,
-  getCurrentUser,
-  getUsernameForWallet,
-} from "../lib/storage";
+import { apiService, CreateAuctionRequest } from "../../lib/api";
 import {
   Card,
   CardContent,
@@ -57,10 +53,10 @@ export default function CreateAuctionPage() {
     currentTag: "",
   });
 
-  // États pour les paramètres d'enchères
+  // États pour les paramètres d'enchères (adaptés aux smart contracts)
   const [auctionSettings, setAuctionSettings] = useState({
-    maxPrice: "", // Prix maximum (prix de départ)
-    minPrice: "", // Prix minimum (prix de réserve)
+    minPrice: "", // Prix minimum (prix de départ) - Starting Price
+    maxPrice: "", // Prix maximum (prix de réserve) - Reserve Price
     duration: {
       days: 0,
       hours: 0,
@@ -68,20 +64,34 @@ export default function CreateAuctionPage() {
     },
   });
 
+  // État pour l'NFT
+  const [nftData, setNftData] = useState({
+    name: "",
+    description: "",
+    image: null as File | null,
+    imageUrl: "",
+    metadata: {},
+  });
+
   // États pour l'interface
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<string>("");
+  const [cancelUpload, setCancelUpload] = useState<boolean>(false);
   const [notifications, setNotifications] = useState<
     Array<{
       id: string;
-      type: "success" | "error";
+      type: "success" | "error" | "info";
       message: string;
       timestamp: number;
     }>
   >([]);
 
   // Fonction pour ajouter une notification
-  const addNotification = (type: "success" | "error", message: string) => {
+  const addNotification = (
+    type: "success" | "error" | "info",
+    message: string,
+  ) => {
     const id = Math.random().toString(36).substr(2, 9);
     const newNotification = {
       id,
@@ -98,7 +108,16 @@ export default function CreateAuctionPage() {
     }, 3000);
   };
 
-  // Fonction pour calculer la durée totale en minutes
+  // Fonction pour calculer la durée totale en millisecondes (requis par les smart contracts)
+  const getTotalDurationInMs = () => {
+    return (
+      auctionSettings.duration.days * 24 * 60 * 60 * 1000 +
+      auctionSettings.duration.hours * 60 * 60 * 1000 +
+      auctionSettings.duration.minutes * 60 * 1000
+    );
+  };
+
+  // Fonction pour calculer la durée totale en minutes (pour l'affichage)
   const getTotalDurationInMinutes = () => {
     return (
       auctionSettings.duration.days * 24 * 60 +
@@ -117,25 +136,29 @@ export default function CreateAuctionPage() {
     return result.join(", ") || "0 minutes";
   };
 
-  // Gestion des images
+  // Gestion de l'upload d'image NFT
   const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (files) {
+    const file = event.target.files?.[0];
+    if (file && file.type.startsWith("image/")) {
       setIsUploading(true);
-      Array.from(files).forEach((file) => {
-        if (file.type.startsWith("image/")) {
-          const reader = new FileReader();
-          reader.onload = (e) => {
-            const result = e.target?.result as string;
-            setImages((prev) => [...prev, result]);
-            if (!mainImage) {
-              setMainImage(result);
-            }
-            setIsUploading(false);
-          };
-          reader.readAsDataURL(file);
-        }
-      });
+
+      // Sauvegarder le fichier pour l'upload NFT
+      setNftData((prev) => ({
+        ...prev,
+        image: file,
+        name: file.name.split(".")[0], // Utiliser le nom du fichier comme nom NFT par défaut
+      }));
+
+      // Afficher l'image en prévisualisation
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const result = e.target?.result as string;
+        setNftData((prev) => ({ ...prev, imageUrl: result }));
+        setImages([result]); // Une seule image pour un NFT
+        setMainImage(result);
+        setIsUploading(false);
+      };
+      reader.readAsDataURL(file);
     }
   };
 
@@ -145,6 +168,15 @@ export default function CreateAuctionPage() {
     if (mainImage === images[index]) {
       setMainImage(newImages[0] || null);
     }
+
+    // Réinitialiser les données NFT
+    setNftData({
+      name: "",
+      description: "",
+      image: null,
+      imageUrl: "",
+      metadata: {},
+    });
   };
 
   const setAsMainImage = (image: string) => {
@@ -196,7 +228,116 @@ export default function CreateAuctionPage() {
     addNotification("success", "Draft saved successfully!");
   };
 
-  const handlePublish = () => {
+  // Fonction pour créer l'NFT et l'enchère via le backend
+  const createNFTAndAuction = async () => {
+    if (!account || !nftData.image) {
+      console.error("Missing account or NFT image");
+      return;
+    }
+
+    try {
+      setIsUploading(true);
+      setCancelUpload(false);
+      setUploadProgress("Creating NFT...");
+      addNotification("info", "Creating NFT...");
+      console.log("Starting NFT creation process...");
+
+      // 1. Créer l'NFT d'abord
+      const formData = new FormData();
+      formData.append("image", nftData.image);
+      formData.append("name", nftData.name || productInfo.title);
+      formData.append(
+        "description",
+        nftData.description || productInfo.description,
+      );
+      formData.append("signer", account.address);
+
+      console.log("Sending NFT creation request...");
+      console.log("FormData entries:", Array.from(formData.entries()));
+      console.log(
+        "API Base URL:",
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001",
+      );
+
+      // Test direct fetch first
+      try {
+        console.log("Testing direct fetch to backend...");
+        const testResponse = await fetch("http://localhost:3001/api/health", {
+          method: "GET",
+        });
+        console.log("Health check response:", testResponse.status);
+      } catch (testError) {
+        console.error("Health check failed:", testError);
+        throw new Error("Cannot connect to backend server");
+      }
+
+      const nftResult = await apiService.createNFT(formData);
+      console.log("NFT creation result:", nftResult);
+
+      if (!nftResult.success || !nftResult.data) {
+        throw new Error(nftResult.error || "Failed to create NFT");
+      }
+
+      setUploadProgress("NFT created! Creating auction...");
+      addNotification(
+        "success",
+        "NFT created successfully! Creating auction...",
+      );
+
+      // 2. Créer l'enchère avec l'NFT
+      const auctionData: CreateAuctionRequest = {
+        seller: account.address,
+        nft: nftResult.data.objectId, // Passer l'ID de l'NFT créé
+        minPrice: parseInt(auctionSettings.minPrice),
+        maxPrice: parseInt(auctionSettings.maxPrice),
+        durationMs: getTotalDurationInMs(),
+        name: productInfo.title,
+        description: productInfo.description,
+        signer: account.address,
+      };
+
+      console.log("Sending auction creation request...", auctionData);
+
+      const auctionResult = await apiService.createAuction(auctionData);
+      console.log("Auction creation result:", auctionResult);
+
+      if (!auctionResult.success) {
+        throw new Error(auctionResult.error || "Failed to create auction");
+      }
+
+      addNotification(
+        "success",
+        "NFT and auction created successfully! Your auction is now live.",
+      );
+
+      // Redirection vers la page des enchères
+      setTimeout(() => {
+        router.push("/auctions");
+      }, 1500);
+
+      return auctionResult;
+    } catch (error) {
+      console.error("Error creating NFT and auction:", error);
+      addNotification(
+        "error",
+        `Failed to create auction: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+      throw error; // Re-throw to be caught by handlePublish
+    } finally {
+      console.log("Setting isUploading to false");
+      setIsUploading(false);
+      setUploadProgress("");
+    }
+  };
+
+  const handleCancelUpload = () => {
+    setCancelUpload(true);
+    setIsUploading(false);
+    setUploadProgress("");
+    addNotification("error", "Upload cancelled by user");
+  };
+
+  const handlePublish = async () => {
     // Vérifier que le wallet est connecté
     if (!account) {
       addNotification(
@@ -207,8 +348,8 @@ export default function CreateAuctionPage() {
     }
 
     // Validation des prix : le prix de réserve (Reserve Price) doit être strictement supérieur au prix de départ (Starting Price)
-    const startingPriceValue = parseFloat(auctionSettings.maxPrice); // Starting Price (prix de départ)
-    const reservePriceValue = parseFloat(auctionSettings.minPrice); // Reserve Price (prix de réserve)
+    const startingPriceValue = parseFloat(auctionSettings.minPrice); // Starting Price (prix de départ)
+    const reservePriceValue = parseFloat(auctionSettings.maxPrice); // Reserve Price (prix de réserve)
 
     if (reservePriceValue <= startingPriceValue) {
       addNotification(
@@ -222,45 +363,33 @@ export default function CreateAuctionPage() {
     if (
       !productInfo.title ||
       !productInfo.description ||
+      !auctionSettings.minPrice ||
       !auctionSettings.maxPrice ||
-      !auctionSettings.minPrice
+      !nftData.image
     ) {
-      addNotification("error", "Please fill in all required fields");
+      addNotification(
+        "error",
+        "Please fill in all required fields and upload an NFT image",
+      );
       return;
     }
 
-    // Image validation temporarily disabled
-    // if (images.length === 0) {
-    //   alert("Please upload at least one image");
-    //   return;
-    // }
+    // Validation de la durée
+    if (getTotalDurationInMs() <= 0) {
+      addNotification("error", "Please set a valid auction duration");
+      return;
+    }
 
-    // Créer l'enchère
-    const auctionId = addAuction({
-      title: productInfo.title,
-      description: productInfo.description,
-      category: productInfo.category,
-      tags: productInfo.tags,
-      images: images.length > 0 ? images : [], // Utiliser les images si disponibles
-      mainImage: mainImage ?? (images.length > 0 ? images[0] : ""), // Image par défaut si aucune
-      startingPrice: auctionSettings.maxPrice, // Starting price = prix de départ (le plus bas)
-      reservePrice: auctionSettings.minPrice, // Reserve price = prix de réserve (le plus élevé)
-      duration: getTotalDurationInMinutes().toString(), // Convertir en minutes
-      creator: account?.address || "Unknown",
-    });
-
-    console.log("Auction published with ID:", auctionId);
-
-    // Afficher une notification de succès
-    addNotification(
-      "success",
-      "Auction published successfully! Your NFT is now live for bidding",
-    );
-
-    // Redirection après un court délai
-    setTimeout(() => {
-      router.push("/auctions");
-    }, 2000);
+    // Créer l'NFT et l'enchère
+    try {
+      await createNFTAndAuction();
+    } catch (error) {
+      console.error("Error in handlePublish:", error);
+      addNotification(
+        "error",
+        `Failed to publish auction: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
   };
 
   // Composant de prévisualisation
@@ -346,13 +475,13 @@ export default function CreateAuctionPage() {
                 <div>
                   <div className="text-sm text-gray-400">Starting Price</div>
                   <div className="text-white font-semibold text-lg">
-                    {auctionSettings.maxPrice || "0.00"} SUI
+                    {auctionSettings.minPrice || "0.00"} SUI
                   </div>
                 </div>
                 <div>
                   <div className="text-sm text-gray-400">Reserve Price</div>
                   <div className="text-white font-semibold text-lg">
-                    {auctionSettings.minPrice || "0.00"} SUI
+                    {auctionSettings.maxPrice || "0.00"} SUI
                   </div>
                 </div>
                 <div>
@@ -394,12 +523,28 @@ export default function CreateAuctionPage() {
 
           {/* Bouton de publication */}
           <div className="space-y-3">
-            <Button
-              onClick={handlePublish}
-              className="w-full bg-green-600 hover:bg-green-700 text-white py-3 text-lg font-semibold"
-            >
-              Publish Auction
-            </Button>
+            {isUploading ? (
+              <div className="space-y-3">
+                <div className="w-full bg-blue-600 text-white py-3 text-lg font-semibold rounded-lg flex items-center justify-center">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-3"></div>
+                  {uploadProgress || "Processing..."}
+                </div>
+                <Button
+                  onClick={handleCancelUpload}
+                  variant="outline"
+                  className="w-full border-red-600 text-red-300 hover:text-white hover:bg-red-600"
+                >
+                  Cancel Upload
+                </Button>
+              </div>
+            ) : (
+              <Button
+                onClick={handlePublish}
+                className="w-full bg-green-600 hover:bg-green-700 text-white py-3 text-lg font-semibold"
+              >
+                Publish Auction
+              </Button>
+            )}
             <Button
               onClick={() => setIsPreviewMode(false)}
               variant="outline"
@@ -513,12 +658,21 @@ export default function CreateAuctionPage() {
                 <Save className="h-4 w-4 mr-2" />
                 Save Draft
               </Button>
-              <Button
-                onClick={handlePublish}
-                className="bg-green-600 hover:bg-green-700"
-              >
-                Publish Auction
-              </Button>
+              {isUploading ? (
+                <div className="flex items-center space-x-2">
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                  <span className="text-sm">
+                    {uploadProgress || "Processing..."}
+                  </span>
+                </div>
+              ) : (
+                <Button
+                  onClick={handlePublish}
+                  className="bg-green-600 hover:bg-green-700"
+                >
+                  Publish Auction
+                </Button>
+              )}
             </div>
           </div>
         </div>
@@ -538,51 +692,79 @@ export default function CreateAuctionPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                {/* Upload Area - Temporarily Disabled */}
-                <div className="border-2 border-dashed border-slate-600 rounded-lg p-8 text-center opacity-50 cursor-not-allowed">
+                {/* Upload Area pour NFT */}
+                <div className="border-2 border-dashed border-slate-600 rounded-lg p-8 text-center hover:border-blue-500 transition-colors">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleImageUpload}
+                    className="hidden"
+                  />
                   <Upload className="h-12 w-12 mx-auto text-slate-400 mb-4" />
-                  <p className="text-slate-300 mb-2">
-                    Image Upload Temporarily Disabled
+                  <p className="text-slate-300 mb-2">Upload NFT Image</p>
+                  <p className="text-sm text-slate-500 mb-4">
+                    Drag & drop or click to select an image
                   </p>
-                  <p className="text-sm text-slate-500">
-                    This feature will be available soon
-                  </p>
+                  <Button
+                    onClick={() => fileInputRef.current?.click()}
+                    variant="outline"
+                    className="border-slate-600 text-slate-300 hover:text-white"
+                  >
+                    Select Image
+                  </Button>
                 </div>
 
-                {/* Images Grid */}
-                {images.length > 0 && (
-                  <div className="grid grid-cols-2 gap-4">
-                    {images.map((image, index) => (
-                      <div key={index} className="relative group">
-                        <img
-                          src={image}
-                          alt={`Upload ${index + 1}`}
-                          className="w-full h-32 object-cover rounded-lg"
-                        />
-                        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex items-center justify-center space-x-2">
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => setAsMainImage(image)}
-                            className={mainImage === image ? "bg-blue-600" : ""}
-                          >
-                            {mainImage === image ? "Main" : "Set Main"}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="destructive"
-                            onClick={() => removeImage(index)}
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                        </div>
-                        {mainImage === image && (
-                          <Badge className="absolute top-2 left-2 bg-blue-600">
-                            Main Image
-                          </Badge>
-                        )}
+                {/* NFT Image Preview */}
+                {nftData.imageUrl && (
+                  <div className="space-y-4">
+                    <div className="relative group">
+                      <img
+                        src={nftData.imageUrl}
+                        alt="NFT Preview"
+                        className="w-full h-64 object-cover rounded-lg"
+                      />
+                      <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex items-center justify-center">
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => removeImage(0)}
+                        >
+                          <X className="h-4 w-4 mr-2" />
+                          Remove NFT
+                        </Button>
                       </div>
-                    ))}
+                      <Badge className="absolute top-2 left-2 bg-blue-600">
+                        NFT Preview
+                      </Badge>
+                    </div>
+
+                    {/* NFT Metadata */}
+                    <div className="bg-slate-700/50 rounded-lg p-4 space-y-2">
+                      <h4 className="text-white font-medium">NFT Metadata</h4>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-gray-400">Name:</span>
+                          <span className="text-white">
+                            {nftData.name || "Unnamed NFT"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-400">File:</span>
+                          <span className="text-white">
+                            {nftData.image?.name || "No file"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-400">Size:</span>
+                          <span className="text-white">
+                            {nftData.image
+                              ? `${(nftData.image.size / 1024 / 1024).toFixed(2)} MB`
+                              : "Unknown"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 )}
               </CardContent>
@@ -711,41 +893,13 @@ export default function CreateAuctionPage() {
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  {/* Starting Price (Min) */}
+                  {/* Starting Price (Min Price) */}
                   <div>
                     <label className="block text-sm font-medium text-gray-300 mb-2">
                       <DollarSign className="h-4 w-4 inline mr-1" />
                       Starting Price (SUI) *
                       <span className="text-xs text-gray-500 ml-1">
-                        (Min price)
-                      </span>
-                    </label>
-                    <Input
-                      type="text"
-                      inputMode="numeric"
-                      pattern="[0-9]*"
-                      placeholder="0.00"
-                      value={auctionSettings.maxPrice}
-                      onChange={(e) => {
-                        const value = e.target.value;
-                        if (value === "" || /^\d*\.?\d*$/.test(value)) {
-                          setAuctionSettings((prev) => ({
-                            ...prev,
-                            maxPrice: value,
-                          }));
-                        }
-                      }}
-                      className="bg-slate-700 border-slate-600 text-white"
-                    />
-                  </div>
-
-                  {/* Reserve Price (Max) */}
-                  <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-2">
-                      <Tag className="h-4 w-4 inline mr-1" />
-                      Reserve Price (SUI) *
-                      <span className="text-xs text-gray-500 ml-1">
-                        (Max price)
+                        (Minimum price)
                       </span>
                     </label>
                     <Input
@@ -763,11 +917,39 @@ export default function CreateAuctionPage() {
                           }));
                         }
                       }}
+                      className="bg-slate-700 border-slate-600 text-white"
+                    />
+                  </div>
+
+                  {/* Reserve Price (Max Price) */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                      <Tag className="h-4 w-4 inline mr-1" />
+                      Reserve Price (SUI) *
+                      <span className="text-xs text-gray-500 ml-1">
+                        (Maximum price)
+                      </span>
+                    </label>
+                    <Input
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      placeholder="0.00"
+                      value={auctionSettings.maxPrice}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (value === "" || /^\d*\.?\d*$/.test(value)) {
+                          setAuctionSettings((prev) => ({
+                            ...prev,
+                            maxPrice: value,
+                          }));
+                        }
+                      }}
                       className={`bg-slate-700 border-slate-600 text-white ${
                         auctionSettings.maxPrice &&
                         auctionSettings.minPrice &&
-                        parseFloat(auctionSettings.minPrice) <=
-                          parseFloat(auctionSettings.maxPrice)
+                        parseFloat(auctionSettings.maxPrice) <=
+                          parseFloat(auctionSettings.minPrice)
                           ? "border-red-500 focus:border-red-500 focus:ring-red-500"
                           : ""
                       }`}
@@ -775,8 +957,8 @@ export default function CreateAuctionPage() {
                     {/* Message d'erreur pour la validation des prix */}
                     {auctionSettings.maxPrice &&
                       auctionSettings.minPrice &&
-                      parseFloat(auctionSettings.minPrice) <=
-                        parseFloat(auctionSettings.maxPrice) && (
+                      parseFloat(auctionSettings.maxPrice) <=
+                        parseFloat(auctionSettings.minPrice) && (
                         <p className="text-red-400 text-xs mt-1">
                           ⚠️ Reserve price must be strictly greater than
                           starting price
@@ -909,15 +1091,25 @@ export default function CreateAuctionPage() {
             className={`text-white px-6 py-4 rounded-lg shadow-lg border-l-4 flex items-center space-x-3 ${
               notification.type === "success"
                 ? "bg-green-500 border-green-400"
-                : "bg-red-500 border-red-400"
+                : notification.type === "error"
+                  ? "bg-red-500 border-red-400"
+                  : "bg-blue-500 border-blue-400"
             }`}
           >
             <div className="text-2xl">
-              {notification.type === "success" ? "✅" : "❌"}
+              {notification.type === "success"
+                ? "✅"
+                : notification.type === "error"
+                  ? "❌"
+                  : "ℹ️"}
             </div>
             <div>
               <div className="font-semibold">
-                {notification.type === "success" ? "Success!" : "Error"}
+                {notification.type === "success"
+                  ? "Success!"
+                  : notification.type === "error"
+                    ? "Error"
+                    : "Info"}
               </div>
               <div className="text-sm opacity-90">{notification.message}</div>
             </div>
